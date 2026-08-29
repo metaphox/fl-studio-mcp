@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from fastmcp import FastMCP
 
+DEEP_SCAN_LIMIT = 4096
+
 
 def register_plugin_tools(mcp: FastMCP) -> None:
     """Register plugin control tools with the MCP server."""
@@ -99,28 +101,54 @@ def register_plugin_tools(mcp: FastMCP) -> None:
         index: int,
         slot_index: int = -1,
         use_global_index: bool = True,
-        max_params: int = 50
+        max_params: int = 50,
+        offset: int = 0,
+        name_filter: str = ""
     ) -> list[dict]:
-        """Get all parameters of a plugin with their current values.
+        """Get parameters of a plugin with their current values.
+
+        Large plugins expose hundreds of parameters (Harmor has 825), so use
+        name_filter to find a specific control instead of paging through them.
+        Names are matched case-insensitively as substrings.
 
         Args:
             index: Channel index (global) or mixer track index
             slot_index: Effect slot index for mixer plugins (-1 for channel rack)
             use_global_index: Whether to use global channel indexing
             max_params: Maximum number of parameters to return (default 50)
+            offset: Skip parameters below this index (default 0)
+            name_filter: Only return parameters whose name contains this text
+
+        Example - find the filter controls on a Harmor channel:
+            fl_get_plugin_params(0, name_filter="cutoff")
+
+        Example - page past the first 100 parameters:
+            fl_get_plugin_params(0, offset=100, max_params=40)
         """
+        deep_scan = bool(name_filter) or offset > 0
         conn = get_connection()
         result = conn.send_command("plugins.getParams", {
             "index": index,
             "slot_index": slot_index,
             "use_global": use_global_index,
-            "max_params": max_params,
+            "max_params": DEEP_SCAN_LIMIT if deep_scan else max_params,
+            "offset": offset,
+            "name_filter": name_filter,
         })
 
         if not result.get("success", False) and "error" in result:
             return [{"error": result["error"]}]
 
-        return result.get("params", [])
+        found = result.get("params", [])
+
+        if offset:
+            found = [p for p in found if p.get("index", 0) >= offset]
+
+        if name_filter:
+            needle = name_filter.lower()
+            found = [p for p in found if needle in p.get("name", "").lower()]
+
+        return found[:max_params]
 
     @mcp.tool()
     def fl_get_plugin_param_value(

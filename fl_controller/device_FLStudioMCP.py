@@ -724,11 +724,13 @@ def handle_plugins_get_param_count(params: dict) -> dict:
 
 
 def handle_plugins_get_params(params: dict) -> dict:
-    """Get all plugin parameters."""
+    """Get plugin parameters, optionally paged and filtered by name."""
     index = params.get("index", 0)
     slot_index = params.get("slot_index", -1)
     use_global = params.get("use_global", True)
     max_params = params.get("max_params", 50)
+    offset = params.get("offset", 0)
+    name_filter = params.get("name_filter", "").lower()
 
     if slot_index >= 0:
         param_count = plugins.getParamCount(index, slot_index, True)
@@ -736,14 +738,22 @@ def handle_plugins_get_params(params: dict) -> dict:
         param_count = plugins.getParamCount(index, -1, use_global)
 
     param_list = []
-    for i in range(min(param_count, max_params)):
+    for i in range(max(offset, 0), param_count):
+        if len(param_list) >= max_params:
+            break
         try:
             if slot_index >= 0:
                 name = plugins.getParamName(i, index, slot_index, True)
+            else:
+                name = plugins.getParamName(i, index, -1, use_global)
+
+            if name_filter and name_filter not in name.lower():
+                continue
+
+            if slot_index >= 0:
                 value = plugins.getParamValue(i, index, slot_index, True)
                 value_str = plugins.getParamValueString(i, index, slot_index, True)
             else:
-                name = plugins.getParamName(i, index, -1, use_global)
                 value = plugins.getParamValue(i, index, -1, use_global)
                 value_str = plugins.getParamValueString(i, index, -1, use_global)
 
@@ -757,7 +767,7 @@ def handle_plugins_get_params(params: dict) -> dict:
             print(f"Warning: could not read param {i}: {e}")
             continue
 
-    return {"params": param_list}
+    return {"params": param_list, "total_count": param_count}
 
 
 def handle_plugins_get_param_value(params: dict) -> dict:

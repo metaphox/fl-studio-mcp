@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import platform
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -102,6 +103,83 @@ def _read_state() -> dict | None:
         return None
 
 
+RESPONSE_TIMEOUT_SECONDS = 5.0
+RESPONSE_POLL_INTERVAL = 0.15
+
+
+def _read_response() -> dict | None:
+    """Read the response written by the FL Studio script."""
+    response_file = _get_response_file()
+    if not response_file.exists():
+        return None
+
+    try:
+        with open(response_file) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return None
+
+
+def _response_signature() -> tuple[float, int] | None:
+    """Fingerprint the response file so a later write can be detected."""
+    response_file = _get_response_file()
+    if not response_file.exists():
+        return None
+
+    stat = response_file.stat()
+    return (stat.st_mtime, stat.st_size)
+
+
+def _await_response(previous: tuple[float, int] | None) -> dict | None:
+    """Wait for the FL Studio script to write a new response."""
+    deadline = time.monotonic() + RESPONSE_TIMEOUT_SECONDS
+
+    while time.monotonic() < deadline:
+        if _response_signature() != previous:
+            return _read_response()
+        time.sleep(RESPONSE_POLL_INTERVAL)
+
+    return None
+
+
+def _pending_request_count() -> int:
+    """Count requests still waiting to be consumed by FL Studio."""
+    request_file = _get_request_file()
+    if not request_file.exists():
+        return 0
+
+    try:
+        with open(request_file) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return 0
+
+    return len(data) if isinstance(data, list) else 1
+
+
+def _describe_response(response: dict | None, keystroke: str) -> str:
+    """Turn the FL Studio response into an actionable status string."""
+    if response is None:
+        return (
+            f" WARNING: no response from FL Studio within {RESPONSE_TIMEOUT_SECONDS:.0f}s and"
+            f" {_pending_request_count()} request(s) still queued - the notes were NOT written."
+            f" Focus FL Studio with a piano roll open, then press {keystroke} or call"
+            f" fl_trigger_script."
+        )
+
+    if response.get("status") != "success":
+        return f" WARNING: FL Studio reported a failure: {json.dumps(response)}"
+
+    added = response.get("notes_added", 0)
+    deleted = response.get("notes_deleted", 0)
+    return (
+        f" FL Studio applied it: {added} added, {deleted} deleted."
+        f" Note that fl_send_notes cannot target a channel - it always writes to whichever"
+        f" piano roll is open, so a non-zero delete count on a channel you expected to be"
+        f" empty means the write landed in the wrong piano roll."
+    )
+
+
 def _midi_to_note_name(midi: int) -> str:
     """Convert MIDI note number to note name."""
     note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -112,14 +190,21 @@ def _midi_to_note_name(midi: int) -> str:
 
 def _get_trigger_info(auto_trigger: bool) -> str:
     """Attempt to trigger FL Studio and return a status suffix string."""
-    if not auto_trigger:
-        return ""
     trigger = get_trigger()
+
+    if not auto_trigger:
+        return (
+            f" Not triggered; {_pending_request_count()} request(s) queued."
+            f" Press {trigger.keystroke} or call fl_trigger_script to apply."
+        )
     if not trigger.is_supported:
         return f" Auto-trigger not supported on {trigger.platform}. Press the trigger key manually."
-    if trigger_fl_studio():
-        return " FL Studio triggered successfully."
-    return f" Warning: Could not trigger FL Studio. Press {trigger.keystroke} manually."
+
+    previous = _response_signature()
+    if not trigger_fl_studio():
+        return f" Warning: Could not trigger FL Studio. Press {trigger.keystroke} manually."
+
+    return _describe_response(_await_response(previous), trigger.keystroke)
 
 
 def register_piano_roll_tools(mcp: FastMCP) -> None:
@@ -329,12 +414,14 @@ def register_piano_roll_tools(mcp: FastMCP) -> None:
         if not trigger.is_supported:
             return f"Error: Auto-trigger not supported on {trigger.platform}"
 
-        success = trigger_fl_studio()
+        previous = _response_signature()
 
-        if success:
-            return "FL Studio triggered successfully. Notes should now appear in the piano roll."
-        else:
+        if not trigger_fl_studio():
             return f"Failed to trigger FL Studio. Try pressing {trigger.keystroke} manually."
+
+        return "Triggered FL Studio." + _describe_response(
+            _await_response(previous), trigger.keystroke
+        )
 
     @mcp.tool()
     def fl_get_piano_roll_info() -> dict:
